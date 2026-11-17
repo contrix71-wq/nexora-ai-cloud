@@ -416,6 +416,9 @@ def ask_gemini(message, history=None, previous_interaction_id=None, files=None, 
             break
 
         except urllib.error.HTTPError as error:
+            details = error.read().decode("utf-8", errors="replace")
+            print("Gemini HTTP error:", error.code, details[:3000])
+
             if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
                 raise
 
