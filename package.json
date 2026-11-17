@@ -1,0 +1,29 @@
+{
+  "name": "nexora-ai",
+  "version": "1.0.0",
+  "description": "",
+  "main": "nexora-check.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrix71-wq/nexora-ai-cloud.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/contrix71-wq/nexora-ai-cloud/issues"
+  },
+  "homepage": "https://github.com/contrix71-wq/nexora-ai-cloud#readme",
+  "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/core": "^8.6.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.2"
+  }
+}
