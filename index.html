@@ -633,7 +633,7 @@ const { data: sessionData, error: sessionError } = await supabaseClient.auth.get
 if(sessionError) throw sessionError;
 if(!sessionData.session) throw new Error("Войдите через Google, чтобы отправлять сообщения.");
 
-const response=await fetch("http://127.0.0.1:8000/chat",{
+const response=await fetch("https://nexora-ai-ncj6.onrender.com/chat",{
 method:"POST",
 headers:{"Content-Type":"application/json","Authorization":"Bearer "+sessionData.session.access_token},
 body:JSON.stringify({
