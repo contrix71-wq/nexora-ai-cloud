@@ -226,7 +226,7 @@ def choose_thinking_level(message):
     return "low"
 
 
-def ask_gemini(message, history=None, previous_interaction_id=None, files=None, access_token=None, user_id=None):
+def ask_gemini(message, history=None, previous_interaction_id=None, files=None, access_token=None, user_id=None, stream_callback=None):
     key = os.environ.get("GEMINI_API_KEY", "").strip()
 
     if not key and KEY_FILE.exists():
@@ -393,6 +393,9 @@ def ask_gemini(message, history=None, previous_interaction_id=None, files=None, 
     if previous_interaction_id:
         payload["previous_interaction_id"] = previous_interaction_id
 
+    if stream_callback:
+        payload["stream"] = True
+
     request = urllib.request.Request(
         API_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -410,7 +413,68 @@ def ask_gemini(message, history=None, previous_interaction_id=None, files=None, 
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                if stream_callback:
+                    streamed_parts = []
+                    interaction_id = None
+                    completed = False
+
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+
+                        event_data = line[5:].strip()
+                        if event_data == "[DONE]":
+                            break
+
+                        try:
+                            event = json.loads(event_data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_type = event.get("event_type")
+
+                        if event_type == "interaction.created":
+                            interaction = event.get("interaction", {})
+                            interaction_id = interaction.get("id")
+                            if interaction_id:
+                                stream_callback("meta", {"interaction_id": interaction_id})
+
+                        elif event_type == "step.delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text":
+                                chunk = delta.get("text", "")
+                                if chunk:
+                                    streamed_parts.append(chunk)
+                                    stream_callback("token", {"text": chunk})
+
+                        elif event_type == "interaction.completed":
+                            interaction = event.get("interaction", {})
+                            interaction_id = interaction.get("id") or interaction_id
+                            result = {
+                                "status": interaction.get("status", "completed"),
+                                "id": interaction_id
+                            }
+                            completed = True
+
+                        elif event_type == "error":
+                            error_data = event.get("error", {})
+                            raise RuntimeError(
+                                error_data.get("message", "Ошибка потоковой генерации Gemini")
+                            )
+
+                    if not completed:
+                        result = {"status": "incomplete", "id": interaction_id}
+                    else:
+                        result["steps"] = [{
+                            "type": "model_output",
+                            "content": [{
+                                "type": "text",
+                                "text": "".join(streamed_parts)
+                            }]
+                        }]
+                else:
+                    result = json.loads(response.read().decode("utf-8"))
             elapsed = time.monotonic() - started_at
             print(f"Время ответа Gemini: {elapsed:.1f} сек.")
             break
@@ -481,9 +545,13 @@ class NexoraHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Not found"}, 404)
 
     def do_POST(self):
-        if self.path != "/chat":
+        streaming = self.path == "/chat/stream"
+        if self.path not in ("/chat", "/chat/stream"):
             self.send_json({"error": "Not found"}, 404)
             return
+
+        stream_started = False
+        send_stream_event = None
 
         try:
             auth_header = self.headers.get("Authorization", "")
@@ -597,17 +665,48 @@ class NexoraHandler(BaseHTTPRequestHandler):
             if not isinstance(previous_interaction_id, str):
                 previous_interaction_id = None
 
-            answer, new_interaction_id = ask_gemini(
-                message, history, previous_interaction_id, files,
-                access_token, user_id
-            )
+            if streaming:
+                def send_stream_event(event_type, payload=None):
+                    event_data = {"type": event_type}
+                    if payload:
+                        event_data.update(payload)
+                    encoded = (
+                        "data: " + json.dumps(event_data, ensure_ascii=False) + "\n\n"
+                    ).encode("utf-8")
+                    self.wfile.write(encoded)
+                    self.wfile.flush()
 
-            self.send_json({
-                "assistant": "NEXORA",
-                "message": answer,
-                "model": MODEL,
-                "interaction_id": new_interaction_id
-            })
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.end_headers()
+                stream_started = True
+
+                answer, new_interaction_id = ask_gemini(
+                    message, history, previous_interaction_id, files,
+                    access_token, user_id,
+                    stream_callback=send_stream_event
+                )
+
+                send_stream_event("done", {
+                    "interaction_id": new_interaction_id
+                })
+            else:
+                answer, new_interaction_id = ask_gemini(
+                    message, history, previous_interaction_id, files,
+                    access_token, user_id
+                )
+
+                self.send_json({
+                    "assistant": "NEXORA",
+                    "message": answer,
+                    "model": MODEL,
+                    "interaction_id": new_interaction_id
+                })
 
         except urllib.error.HTTPError as error:
             try:
@@ -617,13 +716,25 @@ class NexoraHandler(BaseHTTPRequestHandler):
                 message = "Ошибка Gemini API"
 
             print("Gemini HTTP error:", error.code, message)
-            self.send_json({
-                "error": f"Gemini API: {message}"
-            }, 502)
+            if stream_started and send_stream_event:
+                try:
+                    send_stream_event("error", {"error": f"Gemini API: {message}"})
+                except Exception:
+                    pass
+            else:
+                self.send_json({
+                    "error": f"Gemini API: {message}"
+                }, 502)
 
         except Exception as error:
             print("NEXORA error:", str(error))
-            self.send_json({"error": str(error)}, 500)
+            if stream_started and send_stream_event:
+                try:
+                    send_stream_event("error", {"error": str(error)})
+                except Exception:
+                    pass
+            else:
+                self.send_json({"error": str(error)}, 500)
 
 
 init_memory()
